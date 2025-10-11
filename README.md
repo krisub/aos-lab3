@@ -20,6 +20,7 @@ kernel creates memory image for a new process by:
 6. pass control to new program at entry point (address in elf header)
   a. but need to zero GPRs!!!! libc init code will mess up if there is values in the registers
 so this is basically gheithos syscall lab except for adding env and auxiliary vectors to stack
+  - and in userspace
 
 main header is Elf64_Ehdr
 and program headers are Elf64_Phdr
