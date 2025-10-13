@@ -249,7 +249,7 @@ int map_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
 
     fprintf(stderr,
             "mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
-            "size=%-#12lx\n",
+            "size=%-#12lx\n\n",
             vaddr, phdr->p_offset, map_size);
   }
   return 0;

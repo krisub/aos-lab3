@@ -9,6 +9,7 @@
  * top_of_stack: stack pointer that will given to child program as %rsp
  * argc: Expected number of arguments
  * argv: Expected argument strings
+ * changed to 16B aligned bc this is 64b machine
  */
 void stack_check(void *top_of_stack, uint64_t argc, char **argv) {
   printf("----- stack check -----\n");
@@ -41,5 +42,5 @@ void stack_check(void *top_of_stack, uint64_t argc, char **argv) {
     auxv_null++;
   }
   printf("aux count: %lu\n", auxv_null - auxv_start);
-  printf("----- end stack check -----\n");
+  printf("----- end stack check -----\n\n");
 }
