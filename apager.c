@@ -4,13 +4,13 @@
 
 /*
 musl-gcc -static -Wl,-Ttext-segment=0x08048000 -o apager apager.c
-musl-gcc -static -no-pie -o simple simple.c
-musl-gcc -static -o dyn_test dyn_test.c
+musl-gcc -static -no-pie -o ./tests/simple ./tests/simple.c
+musl-gcc -static -o ./tests/dyn_test ./tests/dyn_test.c
 
 (sudo) ./apager /bin/ls
 
 
-gdb --args ./apager ./simple
+gdb --args ./apager ./tests/simple
 bt
 info registers rsp
 info frame
