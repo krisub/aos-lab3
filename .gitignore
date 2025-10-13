@@ -1,4 +1,8 @@
 /apager
+/super_simple
+/simple
+/dyn_test
 /tests/super_simple
 /tests/simple
 /tests/dyn_test
+my_malloc.so

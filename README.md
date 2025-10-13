@@ -25,3 +25,18 @@ so this is basically gheithos syscall lab except for adding env and auxiliary ve
 main header is Elf64_Ehdr
 and program headers are Elf64_Phdr
 readelf -l <executable> lets me see headers of executable
+
+
+gcc -o super_simple ./tests/super_simple.c
+LD_DEBUG=symbols ./super_simple > LD_DEBUG_super_simple.txt
+LD_DEBUG=symbols ./super_simple 2>&1 | grep "symbol=" | wc -l
+  188
+
+gcc -shared -fPIC -o my_malloc.so my_malloc.c -ldl
+gcc -o ./tests/dyn_test ./tests/dyn_test.c
+LD_PRELOAD=./my_malloc.so ./tests/dyn_test
+  malloc called with size: 1024
+  malloc returned: 0x561c50e5c2a0
+  (dynamic linking) this is my test executable! :)
+  malloc called with size: 64
+  malloc returned: 0x561c50e5c6b0
