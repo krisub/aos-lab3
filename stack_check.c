@@ -13,8 +13,8 @@
 void stack_check(void *top_of_stack, uint64_t argc, char **argv) {
   printf("----- stack check -----\n");
 
-  assert(((uint64_t)top_of_stack) % 8 == 0);
-  printf("top of stack is 8-byte aligned\n");
+  assert(((uint64_t)top_of_stack) % 16 == 0);
+  printf("top of stack is 16-byte aligned\n");
 
   uint64_t *stack = top_of_stack;
   uint64_t actual_argc = *(stack++);

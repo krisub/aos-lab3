@@ -9,6 +9,13 @@ musl-gcc -static -o dyn_test dyn_test.c
 
 (sudo) ./apager /bin/ls
 
+
+gdb --args ./apager ./simple
+bt
+info registers rsp
+info frame
+x/i $pc
+
 */
 
 int main(int argc, char *argv[], char *envp[]) {
@@ -35,6 +42,8 @@ int main(int argc, char *argv[], char *envp[]) {
       .auxc = auxc,
       .auxv = auxv,
   };
+
+  // print_auxv(auxv); // print the auxiliary vector
 
   const char *exec_path = argv[1];
   debug("loading executable: %s\n", exec_path);
@@ -195,7 +204,6 @@ int check_overlap(Elf64_Phdr *phdrs, int phnum) {
  * return 0 if successful, -1 if not
  */
 int map_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
-
   for (int i = 0; i < phnum; i++) {
     Elf64_Phdr *phdr = &phdrs[i];
 
@@ -203,35 +211,47 @@ int map_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
       continue;
     }
 
-    Elf64_Addr vaddr = phdr->p_vaddr;
-    Elf64_Addr map_addr = vaddr & ~(PG_SIZE - 1); // page aligned address
-    Elf64_Addr page_offset = vaddr - map_addr;
-
-    size_t map_size = phdr->p_memsz + page_offset;
-    off_t file_offset = phdr->p_offset & ~(PG_SIZE - 1);
     int prot = get_mmap_prot(phdr->p_flags);
+    void *map_start = (void *)phdr->p_vaddr;
+    size_t map_size = phdr->p_memsz;
 
-    void *mapped = mmap((void *)map_addr, map_size, prot,
-                        MAP_PRIVATE | MAP_FIXED, fd, file_offset);
-    if (mapped == MAP_FAILED) {
-      debug("mmap failed: addr=0x%lx, size=0x%lx, prot=0x%x, offset=0x%lx\n",
-            map_addr, map_size, prot, file_offset);
-      perror("mmap failed :-|\n");
+    Elf64_Addr vaddr = phdr->p_vaddr;
+    Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
+    Elf64_Addr page_offset = vaddr - map_addr_aligned;
+    size_t map_size_aligned = map_size + page_offset;
+
+    void *mapped_region =
+        mmap((void *)map_addr_aligned, map_size_aligned, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+
+    if (mapped_region == MAP_FAILED) {
+      perror("could not reserve memory for segment :-|\n");
+      return -1;
+    }
+
+    if (phdr->p_filesz > 0) { // read segment content from file (otherwise zeroed -> bss)
+      if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
+        perror("could not seek to segment file offset :-|\n");
+        return -1;
+      }
+
+      ssize_t bytes_read = read(fd, (void *)phdr->p_vaddr, phdr->p_filesz);
+      if (bytes_read != phdr->p_filesz) {
+        perror("could not read segment content :-|\n");
+        return -1;
+      }
+    }
+
+    if (mprotect(mapped_region, map_size_aligned, prot) != 0) {
+      perror("could not set final memory permissions :-|\n");
       return -1;
     }
 
     fprintf(stderr,
-            "mapped segment: base_addr=%-#12lx  file_offset=%-#12lx  "
+            "mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
             "size=%-#12lx\n",
-            map_addr, file_offset, map_size);
-
-    /*
-    BSS segment is the segment that is larger in memory than in file (p_memsz >
-    p_filesz). but mmap automatically fills the extra space with zeros, so i
-    don't need to handle it explicitly.
-    */
+            vaddr, phdr->p_offset, map_size);
   }
-
   return 0;
 }
 
@@ -263,6 +283,8 @@ void *setup_stack(void *stack_top, const loader_info_t *info) {
   char *sp = (char *)stack_top;
   char *copy_argv[info->argc + 1];
   char *copy_envp[info->envc + 1];
+  Elf64_auxv_t copy_auxv[info->auxc + 1];
+  char *child_exec_path = NULL;
 
   // argv -> stack
   for (int i = 0; i < info->argc; i++) {
@@ -272,6 +294,7 @@ void *setup_stack(void *stack_top, const loader_info_t *info) {
     memcpy(sp, info->argv[i], len);
   }
   copy_argv[info->argc] = NULL;
+  child_exec_path = copy_argv[0];
 
   // envp -> stack
   for (int i = 0; i < info->envc; i++) {
@@ -282,17 +305,18 @@ void *setup_stack(void *stack_top, const loader_info_t *info) {
   }
   copy_envp[info->envc] = NULL;
 
-  sp = (char *)((uintptr_t)sp & ~(uintptr_t)0xF); // align to 16 bytes
-
   Elf64_Addr phdr_addr = 0;
   for (int i = 0; i < info->ehdr->e_phnum; i++) {
-    if (info->phdrs[i].p_type == PT_PHDR) {
-      phdr_addr = info->phdrs[i].p_vaddr;
+    Elf64_Phdr *phdr = &info->phdrs[i];
+    if (phdr->p_type == PT_LOAD && info->ehdr->e_phoff >= phdr->p_offset &&
+        info->ehdr->e_phoff < (phdr->p_offset + phdr->p_filesz)) {
+      phdr_addr = phdr->p_vaddr + (info->ehdr->e_phoff - phdr->p_offset);
+      debug("found program headers in PT_LOAD segment %d at address %p\n", i,
+            (void *)phdr_addr);
       break;
     }
   }
 
-  Elf64_auxv_t copy_auxv[info->auxc + 1];
   memcpy(copy_auxv, info->auxv, sizeof(Elf64_auxv_t) * (info->auxc + 1));
 
   for (int i = 0; i < info->auxc; i++) {
@@ -309,23 +333,34 @@ void *setup_stack(void *stack_top, const loader_info_t *info) {
     case AT_ENTRY: // entry point of the program
       copy_auxv[i].a_un.a_val = info->ehdr->e_entry;
       break;
+    case AT_EXECFN: // filename of the program
+      copy_auxv[i].a_un.a_val = (Elf64_Addr)child_exec_path;
+      break;
     }
   }
 
   size_t auxv_size = sizeof(Elf64_auxv_t) * (info->auxc + 1);
-  sp -= auxv_size;
-  memcpy(sp, copy_auxv, auxv_size);
-
   size_t envp_size = sizeof(char *) * (info->envc + 1);
-  sp -= envp_size;
-  memcpy(sp, copy_envp, envp_size);
-
   size_t argv_size = sizeof(char *) * (info->argc + 1);
-  sp -= argv_size;
-  memcpy(sp, copy_argv, argv_size);
+  size_t total_size = auxv_size + envp_size + argv_size + sizeof(uint64_t);
 
-  sp -= sizeof(uint64_t);
-  *(uint64_t *)sp = (uint64_t)info->argc;
+  sp = (char *)((uintptr_t)(sp - total_size) & ~(uintptr_t)0xF);
+
+  char *base = sp;
+
+  *(uint64_t *)base = (uint64_t)info->argc;
+  base += sizeof(uint64_t);
+
+  memcpy(base, copy_argv, argv_size);
+  base += argv_size;
+
+  memcpy(base, copy_envp, envp_size);
+  base += envp_size;
+
+  memcpy(base, copy_auxv, auxv_size);
+
+  // print_auxv(copy_auxv);
+  debug("stack setup complete! new stack pointer: %p\n", sp);
 
   return sp;
 }
@@ -341,8 +376,6 @@ __attribute__((noreturn)) void run_exec(void *entry_point,
   __asm__ volatile(
       // stack pointer
       "mov %0, %%rsp\n"
-      "and $-16, %%rsp\n" // align down to 16 bytes
-      "sub $8, %%rsp\n"   // reserve space so push makes RSP % 16 == 8
 
       // entry point
       "push %1\n"
