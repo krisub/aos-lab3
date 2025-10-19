@@ -12,7 +12,7 @@
 
 #define PG_SIZE sysconf(_SC_PAGESIZE)
 #define STACK_SIZE (1024 * 1024) // 1MB stack size
-#define DEBUG 0                  // 0: debugging off, 1: debugging on
+#define DEBUG 1                  // 0: debugging off, 1: debugging on
 /*#define MAX_AUX 128 // uncomment to use print_auxv */
 
 #if DEBUG
@@ -65,12 +65,14 @@ __attribute__((noreturn)) void run_exec(void *entry_point, void *stack_pointer);
  */
 int get_mmap_prot(Elf64_Word p_flags) {
   int prot = 0;
-  if (p_flags & PF_R)
+  if (p_flags & PF_R) {
     debug("R flag found in program header, setting PROT_READ\n");
     prot |= PROT_READ;
-  if (p_flags & PF_W)
+  }
+  if (p_flags & PF_W) {
     debug("W flag found in program header, setting PROT_WRITE\n");
     prot |= PROT_WRITE;
+  }
   if (p_flags & PF_X) {
     debug("X flag found in program header, setting PROT_EXEC\n");
     prot |= PROT_EXEC;
