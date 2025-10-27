@@ -55,6 +55,8 @@ typedef struct {
 int validate_ehdr(int fd, Elf64_Ehdr *ehdr);
 Elf64_Phdr *load_phdrs(int fd, Elf64_Ehdr *ehdr);
 int check_overlap(Elf64_Phdr *phdrs, int phnum);
+const char *get_interpreter_path(int fd, Elf64_Phdr *phdrs, int phnum);
+void *map_dynamic_segments(int fd, Elf64_Phdr *phdrs, int phnum);
 int map_segments(int fd, Elf64_Phdr *phdrs, int phnum);
 void *alloc_stack(void);
 void *setup_stack(void *stack_top, const loader_info_t *info);

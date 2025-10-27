@@ -64,10 +64,60 @@ int main(int argc, char *argv[], char *envp[]) {
   if (phdrs == NULL)
     CLEANUP_FAIL(fd);
 
-  if (check_overlap(phdrs, ehdr.e_phnum) < 0)
-    CLEANUP_FAIL(fd, phdrs);
+  const char *interp_path = get_interpreter_path(fd, phdrs, ehdr.e_phnum);
+  void *interp_entry_point = NULL;
 
-  if (map_segments(fd, phdrs, ehdr.e_phnum) < 0)
+  if (interp_path != NULL) {
+    debug("opening interpreter: %s\n", interp_path);
+    int interp_fd = open(interp_path, O_RDONLY);
+    if (interp_fd < 0) {
+        perror("could not open interpreter\n");
+        free((void*)interp_path);
+        CLEANUP_FAIL(fd, phdrs); 
+    }
+
+    Elf64_Ehdr interp_ehdr;
+    if (validate_ehdr(interp_fd, &interp_ehdr) < 0) {
+        fprintf(stderr, "interpreter is not a valid ELF file\n");
+        free((void*)interp_path);
+        close(interp_fd);
+        CLEANUP_FAIL(fd, phdrs);
+    }
+
+    Elf64_Phdr *interp_phdrs = load_phdrs(interp_fd, &interp_ehdr);
+    if (interp_phdrs == NULL) {
+        free((void*)interp_path);
+        close(interp_fd);
+        CLEANUP_FAIL(fd, phdrs);
+    }
+
+    void *interp_base_addr = map_dynamic_segments(interp_fd, interp_phdrs, interp_ehdr.e_phnum);
+    if (interp_base_addr == NULL) {
+        fprintf(stderr, "failed to map interpreter\n");
+        free((void*)interp_path);
+        close(interp_fd);
+        free(interp_phdrs);
+        CLEANUP_FAIL(fd, phdrs);
+    }
+
+    // real entry point is the base address + the header's entry offset
+    interp_entry_point = (void *)((Elf64_Addr)interp_base_addr + interp_ehdr.e_entry);
+
+    debug("Interpreter loaded. Base: %p, Entry: %p\n", 
+          interp_base_addr, interp_entry_point);
+    
+    free(interp_phdrs);
+    close(interp_fd);
+    free((void*)interp_path);
+
+  } else { // static
+    if (map_segments(fd, phdrs, ehdr.e_phnum) < 0)
+      CLEANUP_FAIL(fd, phdrs);
+    
+    interp_entry_point = (void*)ehdr.e_entry; // entry point = program entry point
+  }
+
+  if (check_overlap(phdrs, ehdr.e_phnum) < 0)
     CLEANUP_FAIL(fd, phdrs);
 
   void *stack_top = alloc_stack();
@@ -194,6 +244,125 @@ int check_overlap(Elf64_Phdr *phdrs, int phnum) {
   }
 
   return 0; // no overlap
+}
+
+/**
+ * search for a PT_INTERP segment in the program headers
+ * if exists read the interpreter's path string from the file
+ * fd: file descriptor of the executable
+ * phdrs: pointer to the program headers of the executable
+ * phnum: number of program headers
+ * return a (malloc'd) string containing the interpreter path,
+ * or NULL if not found (static executable)
+ */
+const char *get_interpreter_path(int fd, Elf64_Phdr *phdrs, int phnum) {
+    for (int i = 0; i < phnum; i++) {
+        if (phdrs[i].p_type == PT_INTERP) {
+            size_t path_size = phdrs[i].p_filesz;
+            char *path = malloc(path_size + 1);
+            if (path == NULL) {
+                perror("malloc for interpreter path");
+                return NULL;
+            }
+
+            if (lseek(fd, phdrs[i].p_offset, SEEK_SET) != phdrs[i].p_offset) {
+                perror("could not lseek to PT_INTERP\n");
+                free(path);
+                return NULL;
+            }
+            
+            if (read(fd, path, path_size) != path_size) {
+                perror("could not read PT_INTERP\n");
+                free(path);
+                return NULL;
+            }
+            
+            path[path_size] = '\0';
+            
+            debug("found interpreter: %s\n", path);
+            return path;
+        }
+    }
+
+    debug("no interpreter found, assuming static executable\n");
+    return NULL;
+}
+
+
+/**
+ * maps the loadable segments of a dynamic (ET_DYN) executable and
+ * lets the kernel choose the base address
+ * fd: file descriptor of the executable
+ * phdrs: pointer to the program headers
+ * phnum: number of program headers
+ * returns base address where the executable was loaded, or NULL on failure
+ */
+void *map_dynamic_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
+    void *base_addr = NULL;
+    Elf64_Addr load_bias = 0;
+
+    for (int i = 0; i < phnum; i++) {
+        Elf64_Phdr *phdr = &phdrs[i];
+        if (phdr->p_type != PT_LOAD) {
+            continue;
+        }
+
+        int prot = get_mmap_prot(phdr->p_flags);
+
+        Elf64_Addr vaddr = phdr->p_vaddr;
+        Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
+        Elf64_Addr page_offset = vaddr - map_addr_aligned;
+        size_t map_size_aligned = phdr->p_memsz + page_offset;
+
+        void *map_target_addr;
+        int map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+
+        if (base_addr == NULL) { // first segment let kernel choose base
+            map_target_addr = NULL;
+        } else { // map relative to base
+            map_flags |= MAP_FIXED;
+            map_target_addr = (void *)(load_bias + map_addr_aligned);
+        }
+
+        void *mapped_region =
+            mmap(map_target_addr, map_size_aligned, PROT_READ | PROT_WRITE,
+                 map_flags, -1, 0);
+
+        if (mapped_region == MAP_FAILED) {
+            perror("dyn_map: mmap failed\n");
+            return NULL;
+        }
+
+        if (base_addr == NULL) { // save base address and load bias
+            base_addr = mapped_region;
+            load_bias = (Elf64_Addr)base_addr - map_addr_aligned;
+            debug("interpreter mapped at base: %p (load_bias: 0x%lx)\n",
+                  base_addr, load_bias);
+        }
+
+        if (phdr->p_filesz > 0) {
+            if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
+                perror("dyn_map: lseek\n"); return NULL;
+            }
+
+            void *read_dest = (void *)(load_bias + phdr->p_vaddr);
+            if (read(fd, read_dest, phdr->p_filesz) != phdr->p_filesz) {
+                perror("dyn_map: read\n"); return NULL;
+            }
+        }
+
+        void *protect_addr = (void *)(load_bias + map_addr_aligned);
+        if (mprotect(protect_addr, map_size_aligned, prot) != 0) {
+            perror("dyn_map: mprotect\n"); return NULL;
+        }
+
+        fprintf(stderr,
+                "mapped interp segment: base_addr=%-#12lx file_offset=%-#12lx "
+                "size=%-#12lx\n\n",
+                (Elf64_Addr)protect_addr, phdr->p_offset, map_size_aligned);
+    }
+
+    return base_addr;
 }
 
 /**
