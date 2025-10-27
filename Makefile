@@ -11,16 +11,20 @@ DYNAMIC_TEST_CFLAGS = # no extra flags (only apager)
 
 APAGER = apager
 DPAGER = dpager
-HPAGER = hpager
-LOADERS = $(APAGER) $(DPAGER) $(HPAGER)
+HPAGER_P0 = hpager_p0 # prefetch 0 pages
+HPAGER_P1 = hpager_p1 # prefetch 1 page
+HPAGER_P2 = hpager_p2 # prefetch 2 pages
+LOADERS = $(APAGER) $(DPAGER) $(HPAGER_P0) $(HPAGER_P1) $(HPAGER_P2)
 
 TEST_DIR = tests
-TESTS_STATIC = $(TEST_DIR)/simple_static $(TEST_DIR)/super_simple_static $(TEST_DIR)/dyn_test_static $(TEST_DIR)/null_test_static
-TESTS_DYN = $(TEST_DIR)/simple_dyn $(TEST_DIR)/super_simple_dyn $(TEST_DIR)/dyn_test_dyn $(TEST_DIR)/null_test_dyn
+TEST_SRCS := $(shell find $(TEST_DIR) -name '*.c')
+TESTS_STATIC := $(patsubst %.c,%_static,$(TEST_SRCS))
+TESTS_DYN := $(patsubst %.c,%_dyn,$(TEST_SRCS))
 
 all: $(LOADERS) $(TESTS_STATIC) # default all will compile statically
 all_apager: $(APAGER) $(TESTS_DYN) # all with dynamic apager
 all_dpager: $(DPAGER) $(TESTS_STATIC) # all with static dpager
+all_hpager: $(HPAGER_P0) $(HPAGER_P1) $(HPAGER_P2) $(TESTS_STATIC) # all with static hpager
 
 $(APAGER): apager.c apager.h
 	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -o $@ $<
@@ -28,14 +32,26 @@ $(APAGER): apager.c apager.h
 $(DPAGER): dpager.c apager.h
 	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -o $@ $<
 
-$(HPAGER): hpager.c apager.h
-	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -o $@ $<
+$(HPAGER_P0): hpager.c apager.h
+	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -DPREFETCH=0 -o $@ hpager.c
 
-$(TEST_DIR)/%_static: $(TEST_DIR)/%.c
+$(HPAGER_P1): hpager.c apager.h
+	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -DPREFETCH=1 -o $@ hpager.c
+
+$(HPAGER_P2): hpager.c apager.h
+	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -DPREFETCH=2 -o $@ hpager.c
+
+%_static: %.c
+	@mkdir -p $(dir $@) 
 	$(CC) $(CFLAGS) $(STATIC_TEST_CFLAGS) -o $@ $<
 
-$(TEST_DIR)/%_dyn: $(TEST_DIR)/%.c
-	$(CC) $(CFLAGS) $(DYNAMIC_TEST_CFLAGS) -o $@ $<
+%_dyn: %.c
+	@mkdir -p $(dir $@) 
+	$(CC) $(CFLAGS) $(DYNAMIC_TEST_CFLAGS) -o $@ $< -lm
+
+.PHONY: static_tests dyn_tests
+static_tests: $(TESTS_STATIC)
+dyn_tests: $(TESTS_DYN)
 
 ARGS = $(filter-out $@,$(MAKECMDGOALS))
 
@@ -51,29 +67,12 @@ run_dpager: all_dpager
 	$(if $(ARGS),,$(error no executable. Usage: make run_dpager ARGS=./tests/simple_static))
 	./$(DPAGER) $(ARGS)
 
-test: all_apager all_dpager $(HPAGER)
-	@echo ""
-	@echo "--- Running apager (dynamic tests) ---"
-	@for test in $(TESTS_DYN); do \
-		echo "--- Running ./$(APAGER) $$test ---"; \
-		./$(APAGER) $$test; \
-		echo ""; \
-	done
-	@echo "--- Running dpager (static tests) ---"
-	@for test in $(TESTS_STATIC); do \
-		echo "--- Running ./$(DPAGER) $$test ---"; \
-		./$(DPAGER) $$test; \
-		echo ""; \
-	done
-	@echo "--- Running hpager (static tests) ---"
-	@for test in $(TESTS_STATIC); do \
-		echo "--- Running ./$(HPAGER) $$test ---"; \
-		./$(HPAGER) $$test; \
-		echo ""; \
-	done
-	@echo "--- All tests complete ---"
+# default will be hpager with 1 page prefetch
+run_hpager: all_hpager
+	$(if $(ARGS),,$(error no executable. Usage: make run_hpager ARGS=./tests/simple_static))
+	./$(HPAGER_P1) $(ARGS)
 
 clean:
 	rm -f $(LOADERS) $(TESTS_STATIC) $(TESTS_DYN)
 
-.PHONY: all all_apager all_dpager run_apager run_dpager clean
+.PHONY: all all_apager all_dpager static_tests dyn_tests run_apager run_dpager test clean

@@ -1,8 +1,8 @@
 #include <stdio.h>
 #define SIZE (1024 * 100)
 
-int arr1[SIZE] = {1, [SIZE - 1] = 1}; // first and last are 1
-char arr2[SIZE] = {'A', [SIZE - 1] = 'Z'}; // first is 'A', last is 'Z'
+int arr1[SIZE] = {1, [SIZE - 1] = 1};         // first and last are 1
+char arr2[SIZE] = {'A', [SIZE - 1] = 'Z'};    // first is 'A', last is 'Z'
 double arr3[SIZE] = {1.0, [SIZE - 1] = 3.14}; // first is 1.0, last is 3.14
 
 long sum_arr1() {
@@ -36,10 +36,14 @@ double mult_arr3() {
 
 int main() {
   printf("dense access test (statically linked) - starting\n");
-  long r1 = sum_arr1();
-  int r2 = count_arr2();
-  double r3 = mult_arr3();
-  printf("results: %ld, %d, %f\n", r1, r2, r3);
+
+  for (int i = 0; i < 10000; i++) {
+    long r1 = sum_arr1();
+    int r2 = count_arr2();
+    double r3 = mult_arr3();
+    printf("results: %ld, %d, %f\n", r1, r2, r3);
+  }
+
   printf("dense access test (statically linked) - finished\n");
   return 0;
 }

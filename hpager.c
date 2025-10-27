@@ -477,9 +477,11 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
   Elf64_Addr page_start = (Elf64_Addr)fault_addr & ~(PG_SIZE - 1);
   map_a_page(page_start, fault_phdr);
   if (PRINT_MAP) {
-    fprintf(stdout, "handled page fault: mapped page at base_addr=%-#12lx\n", page_start);
+    fprintf(stdout, "handled page fault: mapped page at base_addr=%-#12lx\n",
+            page_start);
   }
 
+  fprintf(stdout, "hpager: prefetching %d pages...\n", PREFETCH);
   for (int i = 0; i < PREFETCH; i++) {
     Elf64_Addr prefetch_page_start = page_start + (i + 1) * PG_SIZE;
     void *seg_end = (void *)(fault_phdr->p_vaddr + fault_phdr->p_memsz);
@@ -487,7 +489,8 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
     if ((void *)prefetch_page_start < seg_end) { // if next page within segment
       map_a_page(prefetch_page_start, fault_phdr);
       if (PRINT_MAP) {
-        fprintf(stdout, "hpager prefetch %d: mapped page at base_addr=%-#12lx\n", i + 1,
+        fprintf(stdout,
+                "hpager prefetch %d: mapped page at base_addr=%-#12lx\n", i + 1,
                 prefetch_page_start);
       }
     }

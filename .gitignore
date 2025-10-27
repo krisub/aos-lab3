@@ -1,8 +1,8 @@
 /apager
-/super_simple
-/simple
-/dyn_test
-/tests/super_simple
-/tests/simple
-/tests/dyn_test
-my_malloc.so
+/dpager
+/hpager_p0
+/hpager_p1
+/hpager_p2
+/tests/*_static
+/tests/*_dyn
+/my_malloc.so
