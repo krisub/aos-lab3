@@ -271,7 +271,7 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
 
     Elf64_Addr seg_file_end = entry_phdr->p_vaddr + entry_phdr->p_filesz;
     Elf64_Addr page_end = entry_page_start + PG_SIZE;
-    
+
     if (page_end > seg_file_end) {
       bytes_to_read = seg_file_end - entry_page_start;
     } else {
@@ -296,7 +296,7 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
   }
 
   fprintf(stderr,
-          "mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
+          "dpager: mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
           "size=%-#12lx\n\n",
           entry_page_start, file_offset, PG_SIZE);
 
@@ -462,10 +462,10 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
   if (page_start < (fault_phdr->p_vaddr + fault_phdr->p_filesz)) {
     off_t file_offset =
         fault_phdr->p_offset + (page_start - fault_phdr->p_vaddr);
-    
+
     Elf64_Addr seg_file_end = fault_phdr->p_vaddr + fault_phdr->p_filesz;
     Elf64_Addr page_end = page_start + PG_SIZE;
-    
+
     if (page_end > seg_file_end) {
       bytes_to_read = seg_file_end - page_start;
     } else {

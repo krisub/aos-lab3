@@ -1,4 +1,4 @@
-// demand loader # RN THIS IS COPY OF DPAGER
+// hybrid loader
 #define _GNU_SOURCE
 #include "apager.h"
 #include "stack_check.c"
@@ -24,7 +24,8 @@ x/i $pc
 static Elf64_Phdr *g_phdrs;
 static int g_phnum;
 static int g_fd;
-int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum);
+int map_initialized_segments(int fd, Elf64_Phdr *phdrs, int phnum);
+static void map_a_page(Elf64_Addr page_start, Elf64_Phdr *phdr);
 static void page_fault_handler(int signum, siginfo_t *si, void *ucontext);
 
 int main(int argc, char *argv[], char *envp[]) {
@@ -80,7 +81,8 @@ int main(int argc, char *argv[], char *envp[]) {
   if (check_overlap(phdrs, ehdr.e_phnum) < 0)
     CLEANUP_FAIL(fd, phdrs);
 
-  if (map_segment(fd, &ehdr, phdrs, ehdr.e_phnum) < 0)
+  if (map_initialized_segments(g_fd, g_phdrs, g_phnum) <
+      0) // okay to use globals bc alr set
     CLEANUP_FAIL(fd, phdrs);
 
   void *stack_top = alloc_stack();
@@ -218,88 +220,61 @@ int check_overlap(Elf64_Phdr *phdrs, int phnum) {
 }
 
 /**
- * map the page containing the entry point of the executable into memory
+ * map the initialized (file-backed) segments of the executable into memory
  * fd: file descriptor of the executable
- * ehdr: pointer to the ELF header of the executable
  * phdrs: pointer to the program headers of the executable
  * phnum: number of program headers
  * return 0 if successful, -1 if not
  */
-int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
-  void *entry_point = (void *)ehdr->e_entry;
-  debug("program entry point: %p", entry_point);
-
-  // find the PT_LOAD segment containing the entry point
-  Elf64_Phdr *entry_phdr = NULL;
+int map_initialized_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
   for (int i = 0; i < phnum; i++) {
     Elf64_Phdr *phdr = &phdrs[i];
-    if (phdr->p_type == PT_LOAD) {
-      void *seg_start = (void *)phdr->p_vaddr;
-      void *seg_end = (void *)(phdr->p_vaddr + phdr->p_memsz);
-      if (entry_point >= seg_start && entry_point < seg_end) {
-        entry_phdr = phdr;
-        break;
-      }
-    }
-  }
 
-  if (entry_phdr == NULL) {
-    fprintf(stderr, "could not find a loadable segment for the entry point.\n");
-    return -1;
-  }
-
-  Elf64_Addr entry_page_start = (Elf64_Addr)entry_point & ~(PG_SIZE - 1);
-  debug("page containing entry point starts at: %p", (void *)entry_page_start);
-
-  // map just the page containing the entry point
-  int prot = get_mmap_prot(entry_phdr->p_flags);
-  void *mapped_region =
-      mmap((void *)entry_page_start, PG_SIZE, PROT_READ | PROT_WRITE,
-           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-
-  if (mapped_region == MAP_FAILED) {
-    perror("could not map entry point page :-|\n");
-    return -1;
-  }
-
-  off_t file_offset = 0;
-  size_t bytes_to_read = 0;
-
-  if (entry_page_start < (entry_phdr->p_vaddr + entry_phdr->p_filesz)) {
-    file_offset =
-        entry_phdr->p_offset + (entry_page_start - entry_phdr->p_vaddr);
-
-    Elf64_Addr seg_file_end = entry_phdr->p_vaddr + entry_phdr->p_filesz;
-    Elf64_Addr page_end = entry_page_start + PG_SIZE;
-
-    if (page_end > seg_file_end) {
-      bytes_to_read = seg_file_end - entry_page_start;
-    } else {
-      bytes_to_read = PG_SIZE;
+    // only map PT_LOAD segments that have file backing (not BSS)
+    if (phdr->p_type != PT_LOAD || phdr->p_filesz == 0) {
+      continue;
     }
 
-    if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
-      perror("could not seek to entry point page content in file :-|\n");
+    int prot = get_mmap_prot(phdr->p_flags);
+    Elf64_Addr vaddr = phdr->p_vaddr;
+
+    Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
+    Elf64_Addr page_offset = vaddr - map_addr_aligned;
+
+    size_t map_size_aligned =
+        (phdr->p_filesz + page_offset + PG_SIZE - 1) & ~(PG_SIZE - 1);
+
+    void *mapped_region =
+        mmap((void *)map_addr_aligned, map_size_aligned, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+
+    if (mapped_region == MAP_FAILED) {
+      perror("hpager: could not reserve memory for segment :-|\n");
       return -1;
     }
 
-    ssize_t bytes_read = read(fd, (void *)entry_page_start, bytes_to_read);
-    if (bytes_read < 0) {
-      perror("could not read entry point page content :-|\n");
+    if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
+      perror("hpager: could not seek to segment file offset :-|\n");
       return -1;
     }
+
+    ssize_t bytes_read = read(fd, (void *)vaddr, phdr->p_filesz);
+    if (bytes_read != phdr->p_filesz) {
+      perror("hpager: could not read segment content :-|\n");
+      return -1;
+    }
+
+    if (mprotect(mapped_region, map_size_aligned, prot) != 0) {
+      perror("hpager: could not set final memory permissions :-|\n");
+      return -1;
+    }
+
+    fprintf(stderr,
+            "hpager: mapped initialized segment: base_addr=%-#12lx "
+            "file_offset=%-#12lx "
+            "size=%-#12lx\n\n",
+            (Elf64_Addr)map_addr_aligned, phdr->p_offset, map_size_aligned);
   }
-
-  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
-    perror("could not set final memory permissions for entry page :-|\n");
-    return -1;
-  }
-
-  fprintf(stderr,
-          "mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
-          "size=%-#12lx\n\n",
-          entry_page_start, file_offset, PG_SIZE);
-
   return 0;
 }
 
@@ -414,7 +389,56 @@ void *setup_stack(void *stack_top, const loader_info_t *info) {
 }
 
 /**
- * signal handler for SIGSEGV to handle page faults
+ * map a single page.
+ * page_start: The page-aligned address to map.
+ * phdr: The program header for the segment this page belongs to.
+ */
+static void map_a_page(Elf64_Addr page_start, Elf64_Phdr *phdr) {
+  int prot = get_mmap_prot(phdr->p_flags);
+  void *mapped_region =
+      mmap((void *)page_start, PG_SIZE, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+
+  if (mapped_region == MAP_FAILED) {
+    perror("hpager: could not map page :-(\n");
+    exit(1);
+  }
+
+  // file backed
+  if (page_start < (phdr->p_vaddr + phdr->p_filesz)) {
+    off_t file_offset = phdr->p_offset + (page_start - phdr->p_vaddr);
+
+    size_t bytes_to_read = 0;
+    Elf64_Addr seg_file_end = phdr->p_vaddr + phdr->p_filesz;
+    Elf64_Addr page_end = page_start + PG_SIZE;
+
+    if (page_end > seg_file_end) {
+      bytes_to_read = seg_file_end - page_start;
+    } else {
+      bytes_to_read = PG_SIZE;
+    }
+
+    if (bytes_to_read > 0) {
+      if (lseek(g_fd, file_offset, SEEK_SET) != file_offset) {
+        perror("hpager: could not seek to page content in file\n");
+        exit(1);
+      }
+      if (read(g_fd, (void *)page_start, bytes_to_read) < 0) {
+        perror("hpager: could not read page content from file\n");
+        exit(1);
+      }
+    }
+  }
+
+  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
+    perror("hpager: could not set final memory permissions for fault page\n");
+    exit(1);
+  }
+}
+
+/**
+ * signal handler for SIGSEGV to handle page faults.
+ * hpager version, so we prefetch next page too.
  * signum: signal number
  * si: siginfo_t struct containing info about the signal
  * ucontext: pointer to the ucontext_t struct containing the context
@@ -446,49 +470,18 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
   }
 
   Elf64_Addr page_start = (Elf64_Addr)fault_addr & ~(PG_SIZE - 1);
-
-  int prot = get_mmap_prot(fault_phdr->p_flags);
-  void *mapped_region =
-      mmap((void *)page_start, PG_SIZE, PROT_READ | PROT_WRITE,
-           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-
-  if (mapped_region == MAP_FAILED) {
-    perror("could not map faulting page :-(\n");
-    exit(1);
-  }
-
-  size_t bytes_to_read = 0;
-
-  if (page_start < (fault_phdr->p_vaddr + fault_phdr->p_filesz)) {
-    off_t file_offset =
-        fault_phdr->p_offset + (page_start - fault_phdr->p_vaddr);
-
-    Elf64_Addr seg_file_end = fault_phdr->p_vaddr + fault_phdr->p_filesz;
-    Elf64_Addr page_end = page_start + PG_SIZE;
-
-    if (page_end > seg_file_end) {
-      bytes_to_read = seg_file_end - page_start;
-    } else {
-      bytes_to_read = PG_SIZE;
-    }
-
-    if (lseek(g_fd, file_offset, SEEK_SET) != file_offset) {
-      perror("could not seek to page content in file\n");
-      exit(1);
-    }
-    if (read(g_fd, (void *)page_start, bytes_to_read) < 0) {
-      perror("could not read page content from file\n");
-      exit(1);
-    }
-  }
-
-  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
-    perror("could not set final memory permissions for fault page\n");
-    exit(1);
-  }
-
+  map_a_page(page_start, fault_phdr);
   fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
           page_start);
+
+  Elf64_Addr prefetch_page_start = page_start + PG_SIZE;
+  void *seg_end = (void *)(fault_phdr->p_vaddr + fault_phdr->p_memsz);
+
+  if ((void *)prefetch_page_start < seg_end) { // if next page within segment
+    map_a_page(prefetch_page_start, fault_phdr);
+    fprintf(stderr, "hpager prefetch: mapped page at base_addr=%-#12lx\n",
+            prefetch_page_start);
+  }
 }
 
 /**
