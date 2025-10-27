@@ -24,7 +24,6 @@ x/i $pc
 static Elf64_Phdr *g_phdrs;
 static int g_phnum;
 static int g_fd;
-static int map_page_at(int fd, Elf64_Addr page_start, Elf64_Phdr *phdr);
 int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum);
 static void page_fault_handler(int signum, siginfo_t *si, void *ucontext);
 
@@ -219,51 +218,6 @@ int check_overlap(Elf64_Phdr *phdrs, int phnum) {
 }
 
 /**
- * maps a single page of a segment into memory
- * fd: file descriptor of the executable
- * page_start: starting address of the page to map
- * phdr: pointer to the program header of the segment
- * return 0 if successful, -1 if not
- */
-static int map_page_at(int fd, Elf64_Addr page_start, Elf64_Phdr *phdr) {
-  int prot = get_mmap_prot(phdr->p_flags);
-
-  void *mapped_region =
-      mmap((void *)page_start, PG_SIZE, PROT_READ | PROT_WRITE,
-           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-
-  if (mapped_region == MAP_FAILED) {
-    perror("could not map page");
-    return -1;
-  }
-
-  off_t file_offset = 0;
-
-  if (page_start < (phdr->p_vaddr + phdr->p_filesz)) {
-    file_offset = phdr->p_offset + (page_start - phdr->p_vaddr);
-    if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
-      perror("could not seek to page content in file");
-      return -1;
-    }
-    if (read(fd, (void *)page_start, PG_SIZE) < 0) {
-      perror("could not read page content from file");
-      return -1;
-    }
-  }
-
-  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
-    perror("could not set final memory permissions for page");
-    return -1;
-  }
-
-  fprintf(stderr,
-          "mapped startup page: base_addr=%-#12lx file_offset=%-#12lx "
-          "size=%-#12lx\n\n",
-          page_start, file_offset, PG_SIZE);
-  return 0;
-}
-
-/**
  * map the page containing the entry point of the executable into memory
  * fd: file descriptor of the executable
  * ehdr: pointer to the ELF header of the executable
@@ -296,9 +250,6 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
 
   Elf64_Addr entry_page_start = (Elf64_Addr)entry_point & ~(PG_SIZE - 1);
   debug("page containing entry point starts at: %p", (void *)entry_page_start);
-  // if (map_page_at(fd, entry_page_start, entry_phdr) != 0) {
-  //   return -1;
-  // }
 
   // map just the page containing the entry point
   int prot = get_mmap_prot(entry_phdr->p_flags);
@@ -312,16 +263,27 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
   }
 
   off_t file_offset = 0;
+  size_t bytes_to_read = 0;
 
   if (entry_page_start < (entry_phdr->p_vaddr + entry_phdr->p_filesz)) {
     file_offset =
         entry_phdr->p_offset + (entry_page_start - entry_phdr->p_vaddr);
+
+    Elf64_Addr seg_file_end = entry_phdr->p_vaddr + entry_phdr->p_filesz;
+    Elf64_Addr page_end = entry_page_start + PG_SIZE;
+    
+    if (page_end > seg_file_end) {
+      bytes_to_read = seg_file_end - entry_page_start;
+    } else {
+      bytes_to_read = PG_SIZE;
+    }
+
     if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
       perror("could not seek to entry point page content in file :-|\n");
       return -1;
     }
 
-    ssize_t bytes_read = read(fd, (void *)entry_page_start, PG_SIZE);
+    ssize_t bytes_read = read(fd, (void *)entry_page_start, bytes_to_read);
     if (bytes_read < 0) {
       perror("could not read entry point page content :-|\n");
       return -1;
@@ -337,34 +299,6 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
           "mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
           "size=%-#12lx\n\n",
           entry_page_start, file_offset, PG_SIZE);
-
-  /*
-  Elf64_Phdr *header_phdr = NULL;
-  Elf64_Addr phdr_addr = 0;
-  for (int i = 0; i < phnum; i++) {
-    if (phdrs[i].p_type == PT_LOAD && ehdr->e_phoff >= phdrs[i].p_offset &&
-        ehdr->e_phoff < (phdrs[i].p_offset + phdrs[i].p_filesz)) {
-      header_phdr = &phdrs[i];
-      phdr_addr =
-          header_phdr->p_vaddr + (ehdr->e_phoff - header_phdr->p_offset);
-      break;
-    }
-  }
-
-  if (header_phdr == NULL) {
-    fprintf(stderr, "could not find segment for program headers.\n");
-    return -1;
-  }
-
-  Elf64_Addr header_page_start = (Elf64_Addr)phdr_addr & ~(PG_SIZE - 1);
-  // avoid mapping twice if entry and headers are on the same page
-  if (header_page_start != entry_page_start) {
-    debug("mapping program header page at: %p", (void *)header_page_start);
-    if (map_page_at(fd, header_page_start, header_phdr) != 0) {
-      return -1;
-    }
-  }
-  */
 
   return 0;
 }
@@ -503,13 +437,12 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
   }
 
   if (fault_phdr == NULL) {
-    // fprintf(stderr,
-    //         "memory access error: address %p is not in a valid segment.\n",
-    //         fault_addr);
+    fprintf(stderr,
+            "memory access error: address %p is not in a valid segment.\n",
+            fault_addr);
     signal(SIGSEGV, SIG_DFL);
     raise(SIGSEGV);
     return;
-    // exit(1);
   }
 
   Elf64_Addr page_start = (Elf64_Addr)fault_addr & ~(PG_SIZE - 1);
@@ -520,31 +453,42 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
            MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
 
   if (mapped_region == MAP_FAILED) {
-    // perror("could not map faulting page :-(\n");
+    perror("could not map faulting page :-(\n");
     exit(1);
   }
+
+  size_t bytes_to_read = 0;
 
   if (page_start < (fault_phdr->p_vaddr + fault_phdr->p_filesz)) {
     off_t file_offset =
         fault_phdr->p_offset + (page_start - fault_phdr->p_vaddr);
+    
+    Elf64_Addr seg_file_end = fault_phdr->p_vaddr + fault_phdr->p_filesz;
+    Elf64_Addr page_end = page_start + PG_SIZE;
+    
+    if (page_end > seg_file_end) {
+      bytes_to_read = seg_file_end - page_start;
+    } else {
+      bytes_to_read = PG_SIZE;
+    }
 
     if (lseek(g_fd, file_offset, SEEK_SET) != file_offset) {
-      // perror("could not seek to page content in file\n");
+      perror("could not seek to page content in file\n");
       exit(1);
     }
-    if (read(g_fd, (void *)page_start, PG_SIZE) < 0) {
-      // perror("could not read page content from file\n");
+    if (read(g_fd, (void *)page_start, bytes_to_read) < 0) {
+      perror("could not read page content from file\n");
       exit(1);
     }
   }
 
   if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
-    // perror("could not set final memory permissions for fault page\n");
+    perror("could not set final memory permissions for fault page\n");
     exit(1);
   }
 
-  // fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
-  //         page_start);
+  fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
+          page_start);
 }
 
 /**
@@ -569,7 +513,7 @@ __attribute__((noreturn)) void run_exec(void *entry_point,
       "xor %%rdx, %%rdx\n"
       "xor %%rsi, %%rsi\n"
       "xor %%rdi, %%rdi\n"
-      // "xor %%rbp, %%rbp\n"
+      "xor %%rbp, %%rbp\n"
       "xor %%r8, %%r8\n"
       "xor %%r9, %%r9\n"
       "xor %%r10, %%r10\n"
