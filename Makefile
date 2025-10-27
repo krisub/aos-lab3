@@ -23,7 +23,7 @@ all_apager: $(APAGER) $(TESTS_DYN) # all with dynamic apager
 all_dpager: $(DPAGER) $(TESTS_STATIC) # all with static dpager
 
 $(APAGER): apager.c apager.h
-	$(CC) $(CFLAGS) $(APAGER_CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -o $@ $<
 
 $(DPAGER): dpager.c apager.h
 	$(CC) $(CFLAGS) $(LOADER_CFLAGS) -o $@ $<

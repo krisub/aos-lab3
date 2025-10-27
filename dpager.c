@@ -92,8 +92,11 @@ int main(int argc, char *argv[], char *envp[]) {
   void *stack_pointer = setup_stack(stack_top, &info);
   if (stack_pointer == NULL)
     CLEANUP_FAIL(fd, phdrs, stack_top);
-  stack_check(stack_pointer, info.argc,
-              info.argv); // function from stack_check.c (given)
+
+  if (RUN_STACK_CHECK) {
+    stack_check(stack_pointer, info.argc,
+                info.argv); // function from stack_check.c (given)
+  }
 
   struct sigaction sa;
   sa.sa_sigaction = page_fault_handler;
@@ -295,10 +298,12 @@ int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
     return -1;
   }
 
-  fprintf(stderr,
-          "dpager: mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
-          "size=%-#12lx\n\n",
-          entry_page_start, file_offset, PG_SIZE);
+  if (PRINT_MAP) {
+    fprintf(stdout,
+            "dpager: mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
+            "size=%-#12lx\n\n",
+            entry_page_start, file_offset, PG_SIZE);
+  }
 
   return 0;
 }
@@ -487,8 +492,9 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
     exit(1);
   }
 
-  fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
-          page_start);
+  if (PRINT_MAP) { 
+    fprintf(stdout, "handled page fault: mapped page at base_addr=%-#12lx\n", page_start);
+  }
 }
 
 /**

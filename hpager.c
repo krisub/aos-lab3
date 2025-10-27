@@ -94,8 +94,11 @@ int main(int argc, char *argv[], char *envp[]) {
   void *stack_pointer = setup_stack(stack_top, &info);
   if (stack_pointer == NULL)
     CLEANUP_FAIL(fd, phdrs, stack_top);
-  stack_check(stack_pointer, info.argc,
-              info.argv); // function from stack_check.c (given)
+
+  if (RUN_STACK_CHECK) {
+    stack_check(stack_pointer, info.argc,
+                info.argv); // function from stack_check.c (given)
+  }
 
   struct sigaction sa;
   sa.sa_sigaction = page_fault_handler;
@@ -269,11 +272,13 @@ int map_initialized_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
       return -1;
     }
 
-    fprintf(stderr,
-            "hpager: mapped initialized segment: base_addr=%-#12lx "
-            "file_offset=%-#12lx "
-            "size=%-#12lx\n\n",
-            (Elf64_Addr)map_addr_aligned, phdr->p_offset, map_size_aligned);
+    if (PRINT_MAP) {
+      fprintf(stdout,
+              "hpager: mapped initialized segment: base_addr=%-#12lx "
+              "file_offset=%-#12lx "
+              "size=%-#12lx\n\n",
+              (Elf64_Addr)map_addr_aligned, phdr->p_offset, map_size_aligned);
+    }
   }
   return 0;
 }
@@ -471,16 +476,21 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
 
   Elf64_Addr page_start = (Elf64_Addr)fault_addr & ~(PG_SIZE - 1);
   map_a_page(page_start, fault_phdr);
-  fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
-          page_start);
+  if (PRINT_MAP) {
+    fprintf(stdout, "handled page fault: mapped page at base_addr=%-#12lx\n", page_start);
+  }
 
-  Elf64_Addr prefetch_page_start = page_start + PG_SIZE;
-  void *seg_end = (void *)(fault_phdr->p_vaddr + fault_phdr->p_memsz);
+  for (int i = 0; i < PREFETCH; i++) {
+    Elf64_Addr prefetch_page_start = page_start + (i + 1) * PG_SIZE;
+    void *seg_end = (void *)(fault_phdr->p_vaddr + fault_phdr->p_memsz);
 
-  if ((void *)prefetch_page_start < seg_end) { // if next page within segment
-    map_a_page(prefetch_page_start, fault_phdr);
-    fprintf(stderr, "hpager prefetch: mapped page at base_addr=%-#12lx\n",
-            prefetch_page_start);
+    if ((void *)prefetch_page_start < seg_end) { // if next page within segment
+      map_a_page(prefetch_page_start, fault_phdr);
+      if (PRINT_MAP) {
+        fprintf(stdout, "hpager prefetch %d: mapped page at base_addr=%-#12lx\n", i + 1,
+                prefetch_page_start);
+      }
+    }
   }
 }
 

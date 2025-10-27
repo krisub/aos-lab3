@@ -462,7 +462,7 @@ void *map_dynamic_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
     }
 
     if (PRINT_MAP) {
-      fprintf(stderr,
+      fprintf(stdout,
               "apager: mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
               "size=%-#12lx\n\n",
               (Elf64_Addr)mapped_region, phdr->p_offset, map_size_aligned);
@@ -587,10 +587,12 @@ int map_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
       return -1;
     }
 
-    fprintf(stderr,
-            "mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
+    if (PRINT_MAP) {  
+    fprintf(stdout,
+            "apager: mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
             "size=%-#12lx\n\n",
             vaddr, phdr->p_offset, map_size);
+    }
   }
   return 0;
 }

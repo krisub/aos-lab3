@@ -40,3 +40,13 @@ LD_PRELOAD=./my_malloc.so ./tests/dyn_test
   (dynamic linking) this is my test executable! :)
   malloc called with size: 64
   malloc returned: 0x561c50e5c6b0
+
+
+
+the different pagers:
+1. apager with static linking: all at once loader running statically linked executable
+2. apager with dynamic linking: all at once loader running dynamically linked executable
+3. dpager (static linking only): demand pager maps entry page initially, faults on others.
+4. hpager prefetch=0 (static linking only): hybrid pager, maps initialized data eagerly, BSS on demand
+4. hpager prefetch=1 (static linking only): hybrid pager, maps initialized data eagerly, BSS on demand, and prefetches 1 page on fault
+5. hpager prefetch=2 (static linking only): hybrid pager, maps initialized data eagerly, BSS on demand, and prefetches 2 page on fault
