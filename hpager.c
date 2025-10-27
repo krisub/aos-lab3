@@ -1,6 +1,8 @@
-// all at once loader  RIGHT NOW THIS IS JUST A COPY OF THE APAGER
+// demand loader # RN THIS IS COPY OF DPAGER
+#define _GNU_SOURCE
 #include "apager.h"
 #include "stack_check.c"
+#include <signal.h>
 
 /*
 musl-gcc -static -Wl,-Ttext-segment=0x08048000 -o apager apager.c
@@ -11,6 +13,7 @@ musl-gcc -static -o ./tests/dyn_test ./tests/dyn_test.c
 
 
 gdb --args ./apager ./tests/simple
+handle SIGSEGV nostop noprint pass
 bt
 info registers rsp
 info frame
@@ -18,16 +21,18 @@ x/i $pc
 
 */
 
-int check_overlap_dyn(Elf64_Phdr *phdrs, int phnum, void *base_addr);
-void *setup_stack_dyn(void *stack_top, const loader_info_t *info,
-                      void *prog_base_addr, void *interp_base_addr);
+static Elf64_Phdr *g_phdrs;
+static int g_phnum;
+static int g_fd;
+int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum);
+static void page_fault_handler(int signum, siginfo_t *si, void *ucontext);
 
 int main(int argc, char *argv[], char *envp[]) {
 
-  // if (argc != 2) {
-  //   fprintf(stderr, "usage: %s <executable>\n", argv[0]);
-  //   return 1;
-  // }
+  if (argc != 2) {
+    fprintf(stderr, "usage: %s <executable>\n", argv[0]);
+    return 1;
+  }
 
   int envc = 0;
   for (envc = 0; envp[envc] != NULL; envc++)
@@ -68,96 +73,15 @@ int main(int argc, char *argv[], char *envp[]) {
   if (phdrs == NULL)
     CLEANUP_FAIL(fd);
 
-  const char *interp_path = get_interpreter_path(fd, phdrs, ehdr.e_phnum);
-  void *final_entry_point = NULL; // address to jump to
-  // void *interp_entry_point = NULL; // entry point of the interpreter
-  void *prog_base_addr = NULL;                   // base address of the program
-  void *prog_entry_point = (void *)ehdr.e_entry; // entry point of the program
-  void *interp_base_addr = NULL; // base address of the interpreter
+  g_phdrs = phdrs;
+  g_phnum = ehdr.e_phnum;
+  g_fd = fd;
 
-  if (interp_path != NULL) {
-    debug("opening interpreter: %s\n", interp_path);
-    int interp_fd = open(interp_path, O_RDONLY);
-    if (interp_fd < 0) {
-      perror("could not open interpreter\n");
-      free((void *)interp_path);
-      CLEANUP_FAIL(fd, phdrs);
-    }
+  if (check_overlap(phdrs, ehdr.e_phnum) < 0)
+    CLEANUP_FAIL(fd, phdrs);
 
-    Elf64_Ehdr interp_ehdr;
-    if (validate_ehdr(interp_fd, &interp_ehdr) < 0) {
-      fprintf(stderr, "interpreter is not a valid ELF file\n");
-      free((void *)interp_path);
-      close(interp_fd);
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    Elf64_Phdr *interp_phdrs = load_phdrs(interp_fd, &interp_ehdr);
-    if (interp_phdrs == NULL) {
-      free((void *)interp_path);
-      close(interp_fd);
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    interp_base_addr =
-        map_dynamic_segments(interp_fd, interp_phdrs, interp_ehdr.e_phnum);
-
-    if (check_overlap_dyn(interp_phdrs, interp_ehdr.e_phnum, interp_base_addr) <
-        0) {
-      free((void *)interp_path);
-      close(interp_fd);
-      free(interp_phdrs);
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    if (interp_base_addr == NULL) {
-      fprintf(stderr, "failed to map interpreter\n");
-      free((void *)interp_path);
-      close(interp_fd);
-      free(interp_phdrs);
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    // real entry point is the base address + the header's entry offset
-    final_entry_point =
-        (void *)((Elf64_Addr)interp_base_addr + interp_ehdr.e_entry);
-
-    debug("interpreter loaded. base: %p, entry: %p\n", interp_base_addr,
-          final_entry_point);
-
-    free(interp_phdrs);
-    close(interp_fd);
-    free((void *)interp_path);
-
-    debug("loading target program (as dynamic)...\n");
-
-    prog_base_addr = map_dynamic_segments(fd, phdrs, ehdr.e_phnum);
-    if (prog_base_addr == NULL) {
-      fprintf(stderr, "failed to map target program\n");
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    if (check_overlap_dyn(phdrs, ehdr.e_phnum, prog_base_addr) < 0) {
-      CLEANUP_FAIL(fd, phdrs);
-    }
-
-    prog_entry_point = (void *)((Elf64_Addr)prog_base_addr + ehdr.e_entry);
-
-    debug("target program loaded. base: %p, entry: %p\n", prog_base_addr,
-          prog_entry_point);
-
-  } else { // static
-    debug("loading target program (as static)...\n");
-
-    if (map_segments(fd, phdrs, ehdr.e_phnum) < 0)
-      CLEANUP_FAIL(fd, phdrs);
-
-    prog_entry_point = (void *)ehdr.e_entry;
-    final_entry_point = prog_entry_point; // entry point = program entry point
-
-    if (check_overlap(phdrs, ehdr.e_phnum) < 0)
-      CLEANUP_FAIL(fd, phdrs);
-  }
+  if (map_segment(fd, &ehdr, phdrs, ehdr.e_phnum) < 0)
+    CLEANUP_FAIL(fd, phdrs);
 
   void *stack_top = alloc_stack();
   if (stack_top == NULL)
@@ -165,24 +89,26 @@ int main(int argc, char *argv[], char *envp[]) {
 
   info.ehdr = &ehdr;
   info.phdrs = phdrs;
-  info.ehdr->e_entry = (Elf64_Addr)prog_entry_point;
-
-  void *stack_pointer =
-      setup_stack_dyn(stack_top, &info, prog_base_addr, interp_base_addr);
+  void *stack_pointer = setup_stack(stack_top, &info);
   if (stack_pointer == NULL)
     CLEANUP_FAIL(fd, phdrs, stack_top);
+  stack_check(stack_pointer, info.argc,
+              info.argv); // function from stack_check.c (given)
 
-  if (RUN_STACK_CHECK) {
-    stack_check(stack_pointer, info.argc,
-                info.argv); // function from stack_check.c (given)
+  struct sigaction sa;
+  sa.sa_sigaction = page_fault_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_SIGINFO;
+
+  if (sigaction(SIGSEGV, &sa, NULL) == -1) {
+    perror("sigaction failed");
+    return 1;
   }
 
-  close(fd);
-
   debug("transferring control to entry point %p with stack at %p",
-        (void *)final_entry_point, stack_pointer);
+        (void *)ehdr.e_entry, stack_pointer);
 
-  run_exec((void *)final_entry_point, stack_pointer);
+  run_exec((void *)ehdr.e_entry, stack_pointer);
 
   // should never get here
   fprintf(stderr, "error: returned from child program :(\n");
@@ -259,41 +185,6 @@ Elf64_Phdr *load_phdrs(int fd, Elf64_Ehdr *ehdr) {
 
 /**
  * check if the target executable overlaps with the loader in memory
- * DYNAMIC VERSION
- * phdrs: pointer to the program headers of the executable
- * phnum: number of program headers
- * return 0 if no overlap, -1 if overlap
- */
-int check_overlap_dyn(Elf64_Phdr *phdrs, int phnum, void *base_addr) {
-  // start and end of loader in memory
-  extern char _start[], _end[];
-
-  void *loader_start = (void *)_start;
-  void *loader_end = (void *)_end;
-
-  debug("loader memory range: %p - %p", loader_start, loader_end);
-
-  for (int i = 0; i < phnum; i++) {
-    Elf64_Phdr *phdr = &phdrs[i];
-
-    if (phdr->p_type == PT_LOAD) {
-      void *target_start = (void *)(phdr->p_vaddr + (Elf64_Addr)base_addr);
-      void *target_end = (void *)((Elf64_Addr)target_start + phdr->p_memsz);
-
-      if (loader_start < target_end && target_start < loader_end) {
-        fprintf(stderr, "target executable overlaps with loader memory!!\n");
-        fprintf(stderr, "loader: %p-%p, target seegment: %p-%p\n", loader_start,
-                loader_end, target_start, target_end);
-        return -1;
-      }
-    }
-  }
-
-  return 0; // no overlap
-}
-
-/**
- * check if the target executable overlaps with the loader in memory
  * phdrs: pointer to the program headers of the executable
  * phnum: number of program headers
  * return 0 if no overlap, -1 if overlap
@@ -327,271 +218,88 @@ int check_overlap(Elf64_Phdr *phdrs, int phnum) {
 }
 
 /**
- * search for a PT_INTERP segment in the program headers
- * if exists read the interpreter's path string from the file
+ * map the page containing the entry point of the executable into memory
  * fd: file descriptor of the executable
- * phdrs: pointer to the program headers of the executable
- * phnum: number of program headers
- * return a (malloc'd) string containing the interpreter path,
- * or NULL if not found (static executable)
- */
-const char *get_interpreter_path(int fd, Elf64_Phdr *phdrs, int phnum) {
-  for (int i = 0; i < phnum; i++) {
-    if (phdrs[i].p_type == PT_INTERP) {
-      size_t path_size = phdrs[i].p_filesz;
-      char *path = malloc(path_size + 1);
-      if (path == NULL) {
-        perror("malloc for interpreter path");
-        return NULL;
-      }
-
-      if (lseek(fd, phdrs[i].p_offset, SEEK_SET) != phdrs[i].p_offset) {
-        perror("could not lseek to PT_INTERP\n");
-        free(path);
-        return NULL;
-      }
-
-      if (read(fd, path, path_size) != path_size) {
-        perror("could not read PT_INTERP\n");
-        free(path);
-        return NULL;
-      }
-
-      path[path_size] = '\0';
-
-      debug("found interpreter: %s\n", path);
-      return path;
-    }
-  }
-
-  debug("no interpreter found, assuming static executable\n");
-  return NULL;
-}
-
-/**
- * maps the loadable segments of a dynamic (ET_DYN) executable and
- * lets the kernel choose the base address
- * fd: file descriptor of the executable
- * phdrs: pointer to the program headers
- * phnum: number of program headers
- * returns base address where the executable was loaded, or NULL on failure
- */
-void *map_dynamic_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
-  // void *base_addr = NULL;
-  // Elf64_Addr load_bias = 0;
-  Elf64_Addr min_vaddr = (Elf64_Addr)-1;
-  Elf64_Addr max_vaddr = 0;
-
-  for (int i = 0; i < phnum; i++) {
-    if (phdrs[i].p_type == PT_LOAD) {
-      Elf64_Addr seg_start = phdrs[i].p_vaddr & ~(PG_SIZE - 1);
-      Elf64_Addr seg_end = phdrs[i].p_vaddr + phdrs[i].p_memsz;
-
-      if (seg_start < min_vaddr)
-        min_vaddr = seg_start;
-      if (seg_end > max_vaddr)
-        max_vaddr = seg_end;
-    }
-  }
-
-  if (min_vaddr == (Elf64_Addr)-1) {
-    fprintf(stderr, "no PT_LOAD segments found\n");
-    return NULL;
-  }
-
-  size_t total_size = max_vaddr - min_vaddr;
-
-  void *base_addr =
-      mmap(NULL, total_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-  if (base_addr == MAP_FAILED) {
-    perror("dyn_map: failed to reserve address space\n");
-    return NULL;
-  }
-
-  Elf64_Addr load_bias = (Elf64_Addr)base_addr - min_vaddr;
-
-  debug("reserved %zu bytes at base: %p (load_bias: 0x%lx)\n", total_size,
-        base_addr, load_bias);
-
-  for (int i = 0; i < phnum; i++) {
-    Elf64_Phdr *phdr = &phdrs[i];
-    if (phdr->p_type != PT_LOAD) {
-      continue;
-    }
-
-    int prot = get_mmap_prot(phdr->p_flags);
-
-    Elf64_Addr vaddr = phdr->p_vaddr;
-    Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
-    Elf64_Addr page_offset = vaddr - map_addr_aligned;
-    size_t map_size_aligned = phdr->p_memsz + page_offset;
-
-    void *map_target_addr = (void *)(load_bias + map_addr_aligned);
-
-    // remap with correct permissions
-    void *mapped_region =
-        mmap(map_target_addr, map_size_aligned, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-
-    if (mapped_region == MAP_FAILED) {
-      perror("dyn_map: mmap segment failed\n");
-      munmap(base_addr, total_size);
-      return NULL;
-    }
-
-    if (phdr->p_filesz > 0) {
-      if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
-        perror("dyn_map: lseek\n");
-        munmap(base_addr, total_size);
-        return NULL;
-      }
-
-      void *read_dest = (void *)(load_bias + phdr->p_vaddr);
-      if (read(fd, read_dest, phdr->p_filesz) != phdr->p_filesz) {
-        perror("dyn_map: read\n");
-        munmap(base_addr, total_size);
-        return NULL;
-      }
-    }
-
-    if (mprotect(mapped_region, map_size_aligned, prot) != 0) {
-      perror("dyn_map: mprotect\n");
-      munmap(base_addr, total_size);
-      return NULL;
-    }
-
-    if (PRINT_MAP) {
-      fprintf(stderr,
-              "mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
-              "size=%-#12lx\n\n",
-              (Elf64_Addr)mapped_region, phdr->p_offset, map_size_aligned);
-    }
-  }
-
-  /*
-  for (int i = 0; i < phnum; i++) {
-      Elf64_Phdr *phdr = &phdrs[i];
-      if (phdr->p_type != PT_LOAD) {
-          continue;
-      }
-
-      int prot = get_mmap_prot(phdr->p_flags);
-
-      Elf64_Addr vaddr = phdr->p_vaddr;
-      Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
-      Elf64_Addr page_offset = vaddr - map_addr_aligned;
-      size_t map_size_aligned = phdr->p_memsz + page_offset;
-
-      void *map_target_addr;
-      int map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-
-      if (base_addr == NULL) { // first segment let kernel choose base
-          map_target_addr = NULL;
-      } else { // map relative to base
-          map_flags |= MAP_FIXED;
-          map_target_addr = (void *)(load_bias + map_addr_aligned);
-      }
-
-      void *mapped_region =
-          mmap(map_target_addr, map_size_aligned, PROT_READ | PROT_WRITE,
-               map_flags, -1, 0);
-
-      if (mapped_region == MAP_FAILED) {
-          perror("dyn_map: mmap failed\n");
-          return NULL;
-      }
-
-      if (base_addr == NULL) { // save base address and load bias
-          base_addr = mapped_region;
-          load_bias = (Elf64_Addr)base_addr - map_addr_aligned;
-          debug("interpreter mapped at base: %p (load_bias: 0x%lx)\n",
-                base_addr, load_bias);
-      }
-
-      if (phdr->p_filesz > 0) {
-          if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
-              perror("dyn_map: lseek\n"); return NULL;
-          }
-
-          void *read_dest = (void *)(load_bias + phdr->p_vaddr);
-          if (read(fd, read_dest, phdr->p_filesz) != phdr->p_filesz) {
-              perror("dyn_map: read\n"); return NULL;
-          }
-      }
-
-      void *protect_addr = (void *)(load_bias + map_addr_aligned);
-      if (mprotect(protect_addr, map_size_aligned, prot) != 0) {
-          perror("dyn_map: mprotect\n"); return NULL;
-      }
-
-      fprintf(stderr,
-              "mapped interp segment: base_addr=%-#12lx file_offset=%-#12lx "
-              "size=%-#12lx\n\n",
-              (Elf64_Addr)protect_addr, phdr->p_offset, map_size_aligned);
-  }
-  */
-
-  return base_addr;
-}
-
-/**
- * map the loadable segments of the executable into memory
- * fd: file descriptor of the executable
+ * ehdr: pointer to the ELF header of the executable
  * phdrs: pointer to the program headers of the executable
  * phnum: number of program headers
  * return 0 if successful, -1 if not
  */
-int map_segments(int fd, Elf64_Phdr *phdrs, int phnum) {
+int map_segment(int fd, Elf64_Ehdr *ehdr, Elf64_Phdr *phdrs, int phnum) {
+  void *entry_point = (void *)ehdr->e_entry;
+  debug("program entry point: %p", entry_point);
+
+  // find the PT_LOAD segment containing the entry point
+  Elf64_Phdr *entry_phdr = NULL;
   for (int i = 0; i < phnum; i++) {
     Elf64_Phdr *phdr = &phdrs[i];
-
-    if (phdr->p_type != PT_LOAD) {
-      continue;
-    }
-
-    int prot = get_mmap_prot(phdr->p_flags);
-    void *map_start = (void *)phdr->p_vaddr;
-    size_t map_size = phdr->p_memsz;
-
-    Elf64_Addr vaddr = phdr->p_vaddr;
-    Elf64_Addr map_addr_aligned = vaddr & ~(PG_SIZE - 1);
-    Elf64_Addr page_offset = vaddr - map_addr_aligned;
-    size_t map_size_aligned = map_size + page_offset;
-
-    void *mapped_region =
-        mmap((void *)map_addr_aligned, map_size_aligned, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-
-    if (mapped_region == MAP_FAILED) {
-      perror("could not reserve memory for segment :-|\n");
-      return -1;
-    }
-
-    if (phdr->p_filesz >
-        0) { // read segment content from file (otherwise zeroed -> bss)
-      if (lseek(fd, phdr->p_offset, SEEK_SET) != phdr->p_offset) {
-        perror("could not seek to segment file offset :-|\n");
-        return -1;
-      }
-
-      ssize_t bytes_read = read(fd, (void *)phdr->p_vaddr, phdr->p_filesz);
-      if (bytes_read != phdr->p_filesz) {
-        perror("could not read segment content :-|\n");
-        return -1;
+    if (phdr->p_type == PT_LOAD) {
+      void *seg_start = (void *)phdr->p_vaddr;
+      void *seg_end = (void *)(phdr->p_vaddr + phdr->p_memsz);
+      if (entry_point >= seg_start && entry_point < seg_end) {
+        entry_phdr = phdr;
+        break;
       }
     }
-
-    if (mprotect(mapped_region, map_size_aligned, prot) != 0) {
-      perror("could not set final memory permissions :-|\n");
-      return -1;
-    }
-
-    fprintf(stderr,
-            "mapped segment: base_addr=%-#12lx file_offset=%-#12lx "
-            "size=%-#12lx\n\n",
-            vaddr, phdr->p_offset, map_size);
   }
+
+  if (entry_phdr == NULL) {
+    fprintf(stderr, "could not find a loadable segment for the entry point.\n");
+    return -1;
+  }
+
+  Elf64_Addr entry_page_start = (Elf64_Addr)entry_point & ~(PG_SIZE - 1);
+  debug("page containing entry point starts at: %p", (void *)entry_page_start);
+
+  // map just the page containing the entry point
+  int prot = get_mmap_prot(entry_phdr->p_flags);
+  void *mapped_region =
+      mmap((void *)entry_page_start, PG_SIZE, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+
+  if (mapped_region == MAP_FAILED) {
+    perror("could not map entry point page :-|\n");
+    return -1;
+  }
+
+  off_t file_offset = 0;
+  size_t bytes_to_read = 0;
+
+  if (entry_page_start < (entry_phdr->p_vaddr + entry_phdr->p_filesz)) {
+    file_offset =
+        entry_phdr->p_offset + (entry_page_start - entry_phdr->p_vaddr);
+
+    Elf64_Addr seg_file_end = entry_phdr->p_vaddr + entry_phdr->p_filesz;
+    Elf64_Addr page_end = entry_page_start + PG_SIZE;
+
+    if (page_end > seg_file_end) {
+      bytes_to_read = seg_file_end - entry_page_start;
+    } else {
+      bytes_to_read = PG_SIZE;
+    }
+
+    if (lseek(fd, file_offset, SEEK_SET) != file_offset) {
+      perror("could not seek to entry point page content in file :-|\n");
+      return -1;
+    }
+
+    ssize_t bytes_read = read(fd, (void *)entry_page_start, bytes_to_read);
+    if (bytes_read < 0) {
+      perror("could not read entry point page content :-|\n");
+      return -1;
+    }
+  }
+
+  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
+    perror("could not set final memory permissions for entry page :-|\n");
+    return -1;
+  }
+
+  fprintf(stderr,
+          "mapped entry page: base_addr=%-#12lx file_offset=%-#12lx "
+          "size=%-#12lx\n\n",
+          entry_page_start, file_offset, PG_SIZE);
+
   return 0;
 }
 
@@ -614,20 +322,16 @@ void *alloc_stack(void) {
 }
 
 /**
- * setup the stack for the child program DYNAMIC VERSION
+ * setup the stack for the child program
  * stack_top: pointer to the top of the stack
  * info: pointer to the loader_info_t struct containing argc, argv, envp, auxv
  * return pointer to the new stack pointer if successful, NULL if not
  */
-void *setup_stack_dyn(void *stack_top, const loader_info_t *info,
-                      void *prog_base_addr, void *interp_base_addr) {
+void *setup_stack(void *stack_top, const loader_info_t *info) {
   char *sp = (char *)stack_top;
   char *copy_argv[info->argc + 1];
   char *copy_envp[info->envc + 1];
-
-  int aux_entries = info->auxc + (interp_base_addr ? 2 : 1);
-  Elf64_auxv_t copy_auxv[aux_entries];
-
+  Elf64_auxv_t copy_auxv[info->auxc + 1];
   char *child_exec_path = NULL;
 
   // argv -> stack
@@ -650,27 +354,20 @@ void *setup_stack_dyn(void *stack_top, const loader_info_t *info,
   copy_envp[info->envc] = NULL;
 
   Elf64_Addr phdr_addr = 0;
-  if (prog_base_addr) {
-    // dynamic: base address + offset from header
-    phdr_addr = (Elf64_Addr)prog_base_addr + info->ehdr->e_phoff;
-  } else {
-    // static (old)
-    for (int i = 0; i < info->ehdr->e_phnum; i++) {
-      Elf64_Phdr *phdr = &info->phdrs[i];
-      if (phdr->p_type == PT_LOAD && info->ehdr->e_phoff >= phdr->p_offset &&
-          info->ehdr->e_phoff < (phdr->p_offset + phdr->p_filesz)) {
-        phdr_addr = phdr->p_vaddr + (info->ehdr->e_phoff - phdr->p_offset);
-        break;
-      }
+  for (int i = 0; i < info->ehdr->e_phnum; i++) {
+    Elf64_Phdr *phdr = &info->phdrs[i];
+    if (phdr->p_type == PT_LOAD && info->ehdr->e_phoff >= phdr->p_offset &&
+        info->ehdr->e_phoff < (phdr->p_offset + phdr->p_filesz)) {
+      phdr_addr = phdr->p_vaddr + (info->ehdr->e_phoff - phdr->p_offset);
+      debug("found program headers in PT_LOAD segment %d at address %p\n", i,
+            (void *)phdr_addr);
+      break;
     }
   }
-  debug("program headers in memory at: %p\n", (void *)phdr_addr);
 
-  memcpy(copy_auxv, info->auxv,
-         sizeof(Elf64_auxv_t) * (info->auxc)); // not doing at null
+  memcpy(copy_auxv, info->auxv, sizeof(Elf64_auxv_t) * (info->auxc + 1));
 
-  int i;
-  for (i = 0; i < info->auxc; i++) {
+  for (int i = 0; i < info->auxc; i++) {
     switch (copy_auxv[i].a_type) {
     case AT_PHDR: // ptr to program headers
       copy_auxv[i].a_un.a_val = phdr_addr;
@@ -690,17 +387,7 @@ void *setup_stack_dyn(void *stack_top, const loader_info_t *info,
     }
   }
 
-  if (interp_base_addr) {
-    debug("adding AT_BASE: %p\n", interp_base_addr);
-    copy_auxv[i].a_type = AT_BASE;
-    copy_auxv[i].a_un.a_val = (Elf64_Addr)interp_base_addr;
-    i++;
-  }
-
-  copy_auxv[i].a_type = AT_NULL;
-  copy_auxv[i].a_un.a_val = 0;
-
-  size_t auxv_size = sizeof(Elf64_auxv_t) * (i + 1);
+  size_t auxv_size = sizeof(Elf64_auxv_t) * (info->auxc + 1);
   size_t envp_size = sizeof(char *) * (info->envc + 1);
   size_t argv_size = sizeof(char *) * (info->argc + 1);
   size_t total_size = auxv_size + envp_size + argv_size + sizeof(uint64_t);
@@ -726,98 +413,83 @@ void *setup_stack_dyn(void *stack_top, const loader_info_t *info,
   return sp;
 }
 
-// /**
-//  * setup the stack for the child program
-//  * stack_top: pointer to the top of the stack
-//  * info: pointer to the loader_info_t struct containing argc, argv, envp,
-//  auxv
-//  * return pointer to the new stack pointer if successful, NULL if not
-//  */
-// void *setup_stack(void *stack_top, const loader_info_t *info) {
-//   char *sp = (char *)stack_top;
-//   char *copy_argv[info->argc + 1];
-//   char *copy_envp[info->envc + 1];
-//   Elf64_auxv_t copy_auxv[info->auxc + 1];
-//   char *child_exec_path = NULL;
+/**
+ * signal handler for SIGSEGV to handle page faults
+ * signum: signal number
+ * si: siginfo_t struct containing info about the signal
+ * ucontext: pointer to the ucontext_t struct containing the context
+ */
+static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
+  void *fault_addr = si->si_addr;
+  debug("caught SIGSEGV at fault address: %p", fault_addr);
 
-//   // argv -> stack
-//   for (int i = 0; i < info->argc; i++) {
-//     size_t len = strlen(info->argv[i]) + 1;
-//     sp -= len;
-//     copy_argv[i] = sp;
-//     memcpy(sp, info->argv[i], len);
-//   }
-//   copy_argv[info->argc] = NULL;
-//   child_exec_path = copy_argv[0];
+  Elf64_Phdr *fault_phdr = NULL;
+  for (int i = 0; i < g_phnum; i++) {
+    Elf64_Phdr *phdr = &g_phdrs[i];
+    if (phdr->p_type == PT_LOAD) {
+      void *seg_start = (void *)phdr->p_vaddr;
+      void *seg_end = (void *)(phdr->p_vaddr + phdr->p_memsz);
+      if (fault_addr >= seg_start && fault_addr < seg_end) {
+        fault_phdr = phdr;
+        break;
+      }
+    }
+  }
 
-//   // envp -> stack
-//   for (int i = 0; i < info->envc; i++) {
-//     size_t len = strlen(info->envp[i]) + 1;
-//     sp -= len;
-//     copy_envp[i] = sp;
-//     memcpy(sp, info->envp[i], len);
-//   }
-//   copy_envp[info->envc] = NULL;
+  if (fault_phdr == NULL) {
+    fprintf(stderr,
+            "memory access error: address %p is not in a valid segment.\n",
+            fault_addr);
+    signal(SIGSEGV, SIG_DFL);
+    raise(SIGSEGV);
+    return;
+  }
 
-//   Elf64_Addr phdr_addr = 0;
-//   for (int i = 0; i < info->ehdr->e_phnum; i++) {
-//     Elf64_Phdr *phdr = &info->phdrs[i];
-//     if (phdr->p_type == PT_LOAD && info->ehdr->e_phoff >= phdr->p_offset &&
-//         info->ehdr->e_phoff < (phdr->p_offset + phdr->p_filesz)) {
-//       phdr_addr = phdr->p_vaddr + (info->ehdr->e_phoff - phdr->p_offset);
-//       debug("found program headers in PT_LOAD segment %d at address %p\n", i,
-//             (void *)phdr_addr);
-//       break;
-//     }
-//   }
+  Elf64_Addr page_start = (Elf64_Addr)fault_addr & ~(PG_SIZE - 1);
 
-//   memcpy(copy_auxv, info->auxv, sizeof(Elf64_auxv_t) * (info->auxc + 1));
+  int prot = get_mmap_prot(fault_phdr->p_flags);
+  void *mapped_region =
+      mmap((void *)page_start, PG_SIZE, PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
 
-//   for (int i = 0; i < info->auxc; i++) {
-//     switch (copy_auxv[i].a_type) {
-//     case AT_PHDR: // ptr to program headers
-//       copy_auxv[i].a_un.a_val = phdr_addr;
-//       break;
-//     case AT_PHENT: // size of program header entry
-//       copy_auxv[i].a_un.a_val = info->ehdr->e_phentsize;
-//       break;
-//     case AT_PHNUM: // number of program headers
-//       copy_auxv[i].a_un.a_val = info->ehdr->e_phnum;
-//       break;
-//     case AT_ENTRY: // entry point of the program
-//       copy_auxv[i].a_un.a_val = info->ehdr->e_entry;
-//       break;
-//     case AT_EXECFN: // filename of the program
-//       copy_auxv[i].a_un.a_val = (Elf64_Addr)child_exec_path;
-//       break;
-//     }
-//   }
+  if (mapped_region == MAP_FAILED) {
+    perror("could not map faulting page :-(\n");
+    exit(1);
+  }
 
-//   size_t auxv_size = sizeof(Elf64_auxv_t) * (info->auxc + 1);
-//   size_t envp_size = sizeof(char *) * (info->envc + 1);
-//   size_t argv_size = sizeof(char *) * (info->argc + 1);
-//   size_t total_size = auxv_size + envp_size + argv_size + sizeof(uint64_t);
+  size_t bytes_to_read = 0;
 
-//   sp = (char *)((uintptr_t)(sp - total_size) & ~(uintptr_t)0xF);
+  if (page_start < (fault_phdr->p_vaddr + fault_phdr->p_filesz)) {
+    off_t file_offset =
+        fault_phdr->p_offset + (page_start - fault_phdr->p_vaddr);
 
-//   char *base = sp;
+    Elf64_Addr seg_file_end = fault_phdr->p_vaddr + fault_phdr->p_filesz;
+    Elf64_Addr page_end = page_start + PG_SIZE;
 
-//   *(uint64_t *)base = (uint64_t)info->argc;
-//   base += sizeof(uint64_t);
+    if (page_end > seg_file_end) {
+      bytes_to_read = seg_file_end - page_start;
+    } else {
+      bytes_to_read = PG_SIZE;
+    }
 
-//   memcpy(base, copy_argv, argv_size);
-//   base += argv_size;
+    if (lseek(g_fd, file_offset, SEEK_SET) != file_offset) {
+      perror("could not seek to page content in file\n");
+      exit(1);
+    }
+    if (read(g_fd, (void *)page_start, bytes_to_read) < 0) {
+      perror("could not read page content from file\n");
+      exit(1);
+    }
+  }
 
-//   memcpy(base, copy_envp, envp_size);
-//   base += envp_size;
+  if (mprotect(mapped_region, PG_SIZE, prot) != 0) {
+    perror("could not set final memory permissions for fault page\n");
+    exit(1);
+  }
 
-//   memcpy(base, copy_auxv, auxv_size);
-
-//   // print_auxv(copy_auxv);
-//   debug("stack setup complete! new stack pointer: %p\n", sp);
-
-//   return sp;
-// }
+  fprintf(stderr, "handled page fault: mapped page at base_addr=%-#12lx\n",
+          page_start);
+}
 
 /**
  * transfer control to the child program
