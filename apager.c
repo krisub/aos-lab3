@@ -127,7 +127,7 @@ int main(int argc, char *argv[], char *envp[]) {
 
     free(interp_phdrs);
     close(interp_fd);
-    free((void*)interp_path);
+    free((void *)interp_path);
 
     debug("loading target program (as dynamic)...\n");
 
