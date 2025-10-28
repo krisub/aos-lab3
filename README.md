@@ -1,3 +1,16 @@
+Makefile rules
+make all: makes all pagers and statically linked tests
+make static_tests: compiles all tests statically
+make dyn_tests: compiles all tests dynamically
+
+run ./apager /bin/ls -l
+only apager works dynamically
+
+hpager_p0: prefetch 0 pages
+hpager_p1: prefetch 1 page
+hpager_p2: prefetch 2 pages
+
+
 - musl-tools
 - to compile C file with musl-gcc:
   - musl-gcc -static -o apager apager.c
