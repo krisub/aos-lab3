@@ -12,7 +12,7 @@
 
 #define PG_SIZE sysconf(_SC_PAGESIZE)
 #define STACK_SIZE (1024 * 1024) // 1MB stack size
-#define DEBUG 1                 // 0: debugging off, 1: debugging on
+#define DEBUG 0                  // 0: debugging off, 1: debugging on
 #define PRINT_MAP 1              // 0: print mapping info off, 1: on
 #define RUN_STACK_CHECK 1 // 0: disable stack check, 1: enable stack check
 // #define PREFETCH 1        // prefetch PREFETCH pages (ex. 0, 1 , 2)
