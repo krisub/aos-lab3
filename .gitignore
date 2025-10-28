@@ -3,6 +3,8 @@
 /hpager_p0
 /hpager_p1
 /hpager_p2
+/tests/comp_tests/*_static
+/tests/comp_tests/*_dyn
 /tests/*_static
 /tests/*_dyn
 /my_malloc.so

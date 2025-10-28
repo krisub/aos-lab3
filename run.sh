@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # test executable
-TEST_EXEC="./tests/comp_tests/dense_access_static"
+TEST_EXEC="./tests/comp_tests/${1:-sparse_bss_static}"
 
 PAGERS=(
     "./apager"

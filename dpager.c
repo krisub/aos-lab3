@@ -29,11 +29,6 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext);
 
 int main(int argc, char *argv[], char *envp[]) {
 
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <executable>\n", argv[0]);
-    return 1;
-  }
-
   int envc = 0;
   for (envc = 0; envp[envc] != NULL; envc++)
     ;

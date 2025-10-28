@@ -6,8 +6,8 @@ CC = musl-gcc # compiler
 # TEST_CFLAGS = -no-pie
 CFLAGS = -g # general for all tests and pagers
 LOADER_CFLAGS = -static -Wl,-Ttext-segment=0x08048000 # always
-STATIC_TEST_CFLAGS = -static -no-pie # for static tests
-DYNAMIC_TEST_CFLAGS = # no extra flags (only apager)
+STATIC_TEST_CFLAGS = -static -no-pie -Wl,-Ttext-segment=0x40000000 # for static tests
+DYNAMIC_TEST_CFLAGS = -Wl,-Ttext-segment=0x40000000 # no extra flags (only apager)
 
 APAGER = apager
 DPAGER = dpager

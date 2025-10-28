@@ -30,11 +30,6 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext);
 
 int main(int argc, char *argv[], char *envp[]) {
 
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <executable>\n", argv[0]);
-    return 1;
-  }
-
   int envc = 0;
   for (envc = 0; envp[envc] != NULL; envc++)
     ;
@@ -481,7 +476,7 @@ static void page_fault_handler(int signum, siginfo_t *si, void *ucontext) {
             page_start);
   }
 
-  fprintf(stdout, "hpager: prefetching %d pages...\n", PREFETCH);
+  debug("hpager: prefetching %d pages...\n", PREFETCH);
   for (int i = 0; i < PREFETCH; i++) {
     Elf64_Addr prefetch_page_start = page_start + (i + 1) * PG_SIZE;
     void *seg_end = (void *)(fault_phdr->p_vaddr + fault_phdr->p_memsz);

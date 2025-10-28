@@ -1,0 +1,97 @@
+Goal is for apager to do the best.
+Timing Test: ./tests/comp_tests/sparse_bss_static
+-------------------------------------------------------------------------
+Pager         Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+./apager     0.04 0.01 0.03 41072 10270 0
+./dpager     0.09 0.03 0.06 41072 10270 0
+./hpager_p0  0.10 0.04 0.06 41072 10270 0
+./hpager_p1  0.08 0.02 0.06 41072 10273 0
+./hpager_p2  0.06 0.02 0.03 41072 10270 0
+-------------------------------------------------------------------------
+Timing complete.
+
+Goal is for dpager to do the best. (Also uses the least memory).
+Timing Test: ./tests/comp_tests/large_data_static
+-------------------------------------------------------------------------
+Pager         Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+./apager     0.29 0.00 0.29 409716 102431 0
+./dpager     0.00 0.00 0.00 272 30 0
+./hpager_p0  0.28 0.00 0.28 409712 102430 0
+./hpager_p1  0.28 0.00 0.28 409712 102430 0
+./hpager_p2  0.27 0.00 0.27 409712 102430 0
+-------------------------------------------------------------------------
+Timing complete.
+
+Goal is for hpager_p0 to do the best out of all hpagers.
+Timing Test: ./tests/comp_tests/sparse_access_static
+-------------------------------------------------------------------------
+Pager         Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+./apager     0.05 0.01 0.03 41076 10271 0
+./dpager     0.11 0.03 0.07 41072 10270 0
+./hpager_p0  0.12 0.02 0.10 41072 10270 0
+./hpager_p1  0.14 0.05 0.09 41072 10270 0
+./hpager_p2  0.15 0.05 0.10 41072 10271 0
+-------------------------------------------------------------------------
+Timing complete.
+
+Goal is for hpager_p1 to do the best out of all hpagers.
+Timing Test: ./tests/comp_tests/blocked_stride_static
+-------------------------------------------------------------------------
+Pager         Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+./apager     0.08 0.01 0.07 82032 20510 0
+./dpager     0.20 0.05 0.14 82032 20510 0
+./hpager_p0  0.22 0.05 0.16 82036 20511 0
+./hpager_p1  0.17 0.04 0.12 82036 20511 0
+./hpager_p2  0.16 0.06 0.10 82032 20512 0
+-------------------------------------------------------------------------
+Timing complete.
+
+Goal is for hpager_p2 to do the best out of all the hpagers.
+Timing Test: ./tests/comp_tests/seq_access_static
+-------------------------------------------------------------------------
+Pager         Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+./apager     0.65 0.44 0.21 409712 102431 0
+./dpager     1.50 0.93 0.57 409712 102430 0
+./hpager_p0  1.26 0.64 0.61 409716 102431 0
+./hpager_p1  1.07 0.58 0.48 409716 102433 0
+./hpager_p2  0.99 0.54 0.45 409716 102432 0
+-------------------------------------------------------------------------
+Timing complete.
+
+Compare static v dynamic linking, a case where static linking does better.
+./run_dyn.sh
+./tests/simple_static versus ./tests/simple_dyn
+Timing Comparison: Static vs. Dynamic (1000 Runs)
+-------------------------------------------------------------------------
+Test Run          Real(s) User(s) Sys(s) MaxRSS(KB) MinorFaults MajorFaults
+-------------------------------------------------------------------------
+apager (static)   0.82 0.57 0.41 4020 94769 0
+apager (dynamic)  1.34 0.89 0.62 3996 264270 0
+-------------------------------------------------------------------------
+
+ls -lh ./tests/simple_static ./tests/simple_dyn
+-rwxr-xr-x 1 krisub os--krithi-sub 19K Oct 27 18:51 ./tests/simple_dyn
+-rwxr-xr-x 1 krisub os--krithi-sub 35K Oct 27 18:15 ./tests/simple_static
+
+Dynamic linking results:
+
+musl-gcc -shared -fPIC -o my_malloc.so my_malloc.c -ldl
+
+LD_PRELOAD=./my_malloc.so ./apager ./tests/dyn_test_dyn
+(dynamic linking) this is my test executable! :)
+malloc called with size: 64
+malloc returned: 0x7fe5ef46ba80
+
+LD_PRELOAD=./my_malloc.so ./apager ./tests/dyn_test_static
+(dynamic linking) this is my test executable! :)
+Assertion failed: mem[i] == MAGIC (tests/dyn_test.c: main: 13)
+Aborted
+
+ls -lh ./tests/math_test_static ./tests/math_test_dyn
+-rwxr-xr-x 1 krisub os--krithi-sub 19K Oct 27 19:04 ./tests/math_test_dyn
+-rwxr-xr-x 1 krisub os--krithi-sub 34K Oct 27 19:04 ./tests/math_test_static
