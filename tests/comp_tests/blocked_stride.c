@@ -3,13 +3,13 @@
 #define PAGE_SIZE 4096
 #define INT_PER_PAGE (PAGE_SIZE / sizeof(int)) // = 1024
 
-// We will access 2 pages, then skip 1
+// we will access 2 pages, then skip 1
 #define PAGES_IN_CHUNK 2
 #define PAGES_TO_SKIP 1
 #define CHUNK_PAGE_COUNT (PAGES_IN_CHUNK + PAGES_TO_SKIP) // = 3 pages
 #define CHUNK_INT_COUNT (CHUNK_PAGE_COUNT * INT_PER_PAGE) // = 3072 ints
 
-#define NUM_CHUNKS 10240 // Do this 10k times
+#define NUM_CHUNKS (1024 * 32)
 #define ARRAY_SIZE (NUM_CHUNKS * CHUNK_INT_COUNT)
 
 // large uninitialized array = .bss

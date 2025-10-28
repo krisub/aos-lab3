@@ -2,7 +2,7 @@
 
 #define PAGE_SIZE 4096
 #define INT_PER_PAGE (PAGE_SIZE / sizeof(int))
-#define NUM_PAGES (1024 * 100) // 10k pages
+#define NUM_PAGES (1024 * 32) // 32K pages
 #define ARRAY_SIZE (NUM_PAGES * INT_PER_PAGE)
 
 // large uninitialized array = .bss
